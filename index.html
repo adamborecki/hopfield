@@ -1,0 +1,448 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+  <meta name="theme-color" content="#0a0c12">
+  <title>Hopfield Harmonics</title>
+
+  <style>
+    :root {
+      --bg: #0a0c12;
+      --bg-elev: #141824;
+      --bg-elev-2: #1c2130;
+      --fg: #e8ecf2;
+      --fg-dim: #8a93a6;
+      --fg-faint: #4a5064;
+      --accent: #f0b070;
+      --cool: #70b0f0;
+      --border: rgba(255,255,255,0.08);
+    }
+
+    *, *::before, *::after { box-sizing: border-box; }
+
+    html, body {
+      margin: 0; padding: 0;
+      height: 100%; width: 100%;
+      overflow: hidden;
+      background: var(--bg);
+      color: var(--fg);
+      font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Inter", "SF Pro Text", system-ui, sans-serif;
+      -webkit-font-smoothing: antialiased;
+      touch-action: none;
+      overscroll-behavior: none;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+
+    /* ---- Visualization canvas ---- */
+    #viz {
+      position: fixed; inset: 0;
+      z-index: 1;
+    }
+    #viz canvas { display: block; }
+
+    /* ---- Start overlay ---- */
+    #start {
+      position: fixed; inset: 0;
+      z-index: 100;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: radial-gradient(ellipse at center, rgba(20,24,36,0.92) 0%, rgba(8,10,16,0.98) 70%);
+      cursor: pointer;
+      transition: opacity 0.6s ease;
+    }
+    #start.fade-out { opacity: 0; pointer-events: none; }
+    .start-card {
+      text-align: center;
+      padding: 32px;
+      max-width: 420px;
+    }
+    .start-card h1 {
+      font-size: 32px;
+      font-weight: 300;
+      letter-spacing: 0.04em;
+      margin: 0 0 12px 0;
+    }
+    .start-card p {
+      color: var(--fg-dim);
+      margin: 0 0 36px 0;
+      font-size: 15px;
+      line-height: 1.5;
+    }
+    .start-btn {
+      display: inline-block;
+      padding: 14px 28px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      font-size: 14px;
+      letter-spacing: 0.08em;
+      text-transform: lowercase;
+      color: var(--fg-dim);
+      animation: pulse 2.2s ease-in-out infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(240,176,112,0.0); border-color: rgba(255,255,255,0.08); color: var(--fg-dim); }
+      50%      { box-shadow: 0 0 30px 4px rgba(240,176,112,0.10); border-color: rgba(240,176,112,0.4); color: var(--fg); }
+    }
+
+    /* ---- Perturbation square ---- */
+    #squish {
+      position: fixed;
+      top: 0; left: 0;
+      z-index: 10;
+      width: 88px; height: 88px;
+      border-radius: 22px;
+      background:
+        radial-gradient(ellipse at 30% 30%, rgba(255,255,255,0.08), rgba(255,255,255,0) 55%),
+        linear-gradient(140deg, rgba(56, 64, 86, 0.85), rgba(26, 32, 46, 0.85));
+      box-shadow:
+        0 10px 40px rgba(0,0,0,0.5),
+        0 0 0 1px rgba(255,255,255,0.06) inset,
+        0 0 30px rgba(140, 170, 220, 0.10);
+      backdrop-filter: blur(4px);
+      -webkit-backdrop-filter: blur(4px);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      color: rgba(230, 236, 246, 0.65);
+      font-size: 10px;
+      letter-spacing: 0.14em;
+      text-transform: lowercase;
+      touch-action: none;
+      cursor: grab;
+      transition: box-shadow 0.2s, color 0.2s;
+      will-change: transform;
+    }
+    #squish.grabbing {
+      cursor: grabbing;
+      color: rgba(240, 220, 190, 0.95);
+      box-shadow:
+        0 20px 60px rgba(0,0,0,0.6),
+        0 0 0 1px rgba(240,180,120,0.25) inset,
+        0 0 60px rgba(240, 180, 120, 0.18);
+    }
+    #squish span { pointer-events: none; line-height: 1.3; }
+
+    /* ---- Readout ---- */
+    #readout {
+      position: fixed;
+      top: 28px; left: 50%;
+      transform: translate(-50%, -6px);
+      z-index: 20;
+      padding: 8px 16px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: rgba(14, 18, 28, 0.75);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      font-family: ui-monospace, "SF Mono", Menlo, monospace;
+      font-size: 12px;
+      letter-spacing: 0.04em;
+      color: var(--fg);
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.2s ease, transform 0.2s ease;
+      white-space: nowrap;
+    }
+    #readout.visible { opacity: 1; transform: translate(-50%, 0); }
+    #readout .key {
+      color: var(--fg-faint);
+      margin-right: 4px;
+      margin-left: 8px;
+    }
+    #readout .key:first-child { margin-left: 0; }
+
+    /* ---- Corner icon buttons ---- */
+    .icon-btn {
+      position: fixed;
+      z-index: 30;
+      width: 42px; height: 42px;
+      border-radius: 12px;
+      border: 1px solid var(--border);
+      background: rgba(20, 24, 36, 0.6);
+      color: var(--fg-dim);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0;
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      transition: color 0.2s, border-color 0.2s, background 0.2s;
+    }
+    .icon-btn:hover { color: var(--fg); border-color: rgba(255,255,255,0.18); }
+    .icon-btn.active { color: var(--accent); border-color: rgba(240,176,112,0.4); }
+    #gear { top: 18px; right: 18px; }
+    #help { top: 18px; left: 18px; }
+
+    /* ---- Panels ---- */
+    .panel {
+      position: fixed;
+      top: 72px;
+      z-index: 40;
+      width: 340px;
+      max-width: calc(100vw - 28px);
+      max-height: calc(100vh - 92px);
+      overflow-y: auto;
+      padding: 22px 22px 28px;
+      background: rgba(15, 18, 28, 0.92);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      backdrop-filter: blur(14px);
+      -webkit-backdrop-filter: blur(14px);
+      box-shadow: 0 24px 80px rgba(0,0,0,0.5);
+      transform: translateY(-8px);
+      opacity: 0;
+      pointer-events: none;
+      transition: transform 0.25s ease, opacity 0.25s ease;
+    }
+    .panel.open { transform: translateY(0); opacity: 1; pointer-events: auto; }
+    #settings-panel { right: 18px; }
+    #learn-panel    { left:  18px; }
+
+    .panel h2 {
+      font-size: 13px;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      color: var(--fg-dim);
+      margin: 0 0 20px 0;
+      font-weight: 500;
+    }
+
+    .row {
+      display: flex; flex-direction: column; gap: 6px;
+      padding: 10px 0;
+    }
+    .row + .row { border-top: 1px solid var(--border); }
+    .row-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      font-size: 13px;
+    }
+    .row-head .val {
+      font-family: ui-monospace, "SF Mono", Menlo, monospace;
+      font-size: 11px;
+      color: var(--accent);
+      letter-spacing: 0.05em;
+    }
+
+    input[type="range"] {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 100%;
+      height: 4px;
+      border-radius: 2px;
+      background: var(--bg-elev-2);
+      outline: none;
+    }
+    input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 16px; height: 16px;
+      border-radius: 50%;
+      background: var(--fg);
+      border: 2px solid var(--bg-elev);
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    input[type="range"]::-moz-range-thumb {
+      width: 16px; height: 16px;
+      border-radius: 50%;
+      background: var(--fg);
+      border: 2px solid var(--bg-elev);
+      cursor: pointer;
+    }
+
+    .radio-row { display: flex; gap: 10px; margin-top: 4px; }
+    .radio-row label {
+      flex: 1;
+      padding: 8px 12px;
+      background: var(--bg-elev);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      font-size: 12px;
+      text-align: center;
+      cursor: pointer;
+      color: var(--fg-dim);
+      transition: background 0.2s, color 0.2s, border-color 0.2s;
+    }
+    .radio-row label:has(input:checked) {
+      background: var(--bg-elev-2);
+      color: var(--accent);
+      border-color: rgba(240,176,112,0.3);
+    }
+    .radio-row input { display: none; }
+
+    .ghost-btn {
+      display: inline-block;
+      padding: 8px 14px;
+      margin-top: 12px;
+      background: transparent;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--fg-dim);
+      font-size: 12px;
+      cursor: pointer;
+      transition: color 0.2s, border-color 0.2s;
+    }
+    .ghost-btn + .ghost-btn { margin-left: 8px; }
+    .ghost-btn:hover { color: var(--fg); border-color: rgba(255,255,255,0.18); }
+
+    /* ---- Learn-mode panel specifics ---- */
+    #learn-panel p {
+      font-size: 13px;
+      line-height: 1.55;
+      color: var(--fg);
+      margin: 0 0 12px 0;
+    }
+    #learn-panel p em {
+      color: var(--accent);
+      font-style: normal;
+    }
+    #learn-panel .muted { color: var(--fg-dim); font-size: 12px; line-height: 1.55; }
+    #learn-panel .eq {
+      font-family: ui-monospace, "SF Mono", Menlo, monospace;
+      color: var(--cool);
+      font-size: 12px;
+      padding: 8px 10px;
+      background: rgba(30, 40, 56, 0.5);
+      border-radius: 6px;
+      margin: 8px 0 16px 0;
+      display: block;
+    }
+    #learn-step-info {
+      font-family: ui-monospace, "SF Mono", Menlo, monospace;
+      font-size: 11px;
+      color: var(--accent);
+      margin-top: 12px;
+      min-height: 16px;
+    }
+
+    /* ---- Mobile ---- */
+    @media (max-width: 640px) {
+      .panel {
+        left: 12px !important;
+        right: 12px !important;
+        width: auto;
+        top: 72px;
+      }
+      #squish { width: 76px; height: 76px; border-radius: 20px; }
+      .start-card h1 { font-size: 26px; }
+    }
+  </style>
+</head>
+<body>
+  <div id="viz"></div>
+
+  <div id="squish"><span>grab<br>&amp; wiggle</span></div>
+
+  <div id="readout"></div>
+
+  <button id="help" class="icon-btn" aria-label="Learn mode" title="Learn mode">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="12" cy="12" r="9"/>
+      <path d="M9.5 9a2.5 2.5 0 0 1 5 0c0 1.5-1 2-2 2.5-.7.35-1 1-1 2"/>
+      <circle cx="11.5" cy="17" r="0.6" fill="currentColor"/>
+    </svg>
+  </button>
+
+  <button id="gear" class="icon-btn" aria-label="Settings" title="Settings">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="12" cy="12" r="3"/>
+      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9c0 .67.39 1.27 1 1.51H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+    </svg>
+  </button>
+
+  <aside id="settings-panel" class="panel">
+    <h2>settings</h2>
+
+    <div class="row">
+      <div class="row-head"><span>Update rate</span><span class="val" id="v-update-rate">8 Hz</span></div>
+      <input type="range" id="s-update-rate" min="1" max="20" step="1" value="8">
+    </div>
+
+    <div class="row">
+      <div class="row-head"><span>Consonance strength</span><span class="val" id="v-consonance">1.00</span></div>
+      <input type="range" id="s-consonance" min="0" max="2" step="0.05" value="1.0">
+    </div>
+
+    <div class="row">
+      <div class="row-head"><span>Temperature</span><span class="val" id="v-temperature">0.25</span></div>
+      <input type="range" id="s-temperature" min="0.05" max="1.0" step="0.01" value="0.25">
+    </div>
+
+    <div class="row">
+      <div class="row-head"><span>Reverb</span><span class="val" id="v-reverb">0.40</span></div>
+      <input type="range" id="s-reverb" min="0" max="1" step="0.01" value="0.4">
+    </div>
+
+    <div class="row">
+      <div class="row-head"><span>Delay</span><span class="val" id="v-delay">0.28</span></div>
+      <input type="range" id="s-delay" min="0" max="1" step="0.01" value="0.28">
+    </div>
+
+    <div class="row">
+      <div class="row-head"><span>Auto-perturb</span><span class="val" id="v-auto-perturb">off</span></div>
+      <input type="range" id="s-auto-perturb" min="0" max="60" step="1" value="0">
+    </div>
+
+    <div class="row">
+      <div class="row-head"><span>Voicing</span></div>
+      <div class="radio-row">
+        <label><input type="radio" name="s-arpeggiate" value="chord" checked> chord</label>
+        <label><input type="radio" name="s-arpeggiate" value="arpeggio"> arpeggio</label>
+      </div>
+    </div>
+
+    <div class="row">
+      <div class="row-head"><span>Arpeggio rate</span><span class="val" id="v-arp-rate">5 Hz</span></div>
+      <input type="range" id="s-arp-rate" min="1" max="16" step="0.5" value="5">
+    </div>
+
+    <div class="row">
+      <div class="row-head"><span>Master volume</span><span class="val" id="v-volume">75%</span></div>
+      <input type="range" id="s-volume" min="0" max="1" step="0.01" value="0.75">
+    </div>
+
+    <div class="row">
+      <button id="reset-btn" class="ghost-btn">randomize state</button>
+    </div>
+  </aside>
+
+  <aside id="learn-panel" class="panel">
+    <h2>learn mode</h2>
+
+    <p><em>A Hopfield network</em> is a tiny brain made of twelve neurons. Each one is either leaning "on" or "off," and they constantly influence each other through weighted connections.</p>
+
+    <p>Here, each neuron is <em>a pitch</em>. The weight between two neurons is the <em>consonance</em> of the interval between them &mdash; a perfect fifth attracts strongly, a minor second repels.</p>
+
+    <span class="eq">E = &minus;&frac12; &Sigma;&Sigma; W<sub>ij</sub> s<sub>i</sub> s<sub>j</sub></span>
+
+    <p>At every tick, one neuron looks at its neighbours and nudges itself toward whatever value lowers <em>E</em>. Low energy literally means a chord &mdash; the network relaxes into <em>attractor states</em> that happen to be consonant.</p>
+
+    <p class="muted">Grab the square and wiggle. Where you wiggle (x) picks which pitches to shake; how wildly you wiggle (y, velocity) decides how hard. A big enough shake knocks the network out of one chord and into a new one.</p>
+
+    <p class="muted">Tap a node for its pitch. Tap a line for its interval and weight.</p>
+
+    <button id="step-btn"  class="ghost-btn">step once</button>
+    <button id="resume-btn" class="ghost-btn">resume</button>
+
+    <div id="learn-step-info"></div>
+  </aside>
+
+  <div id="start">
+    <div class="start-card">
+      <h1>Hopfield Harmonics</h1>
+      <p>A neural network that listens to itself. Grab the square, wiggle, and watch twelve neurons argue their way into a chord.</p>
+      <div class="start-btn">tap to begin</div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/tone@14.8.49/build/Tone.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/p5@1.9.3/lib/p5.min.js"></script>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>
