@@ -1,8 +1,9 @@
 // audio.js — Tone.js engine for Hopfield.
 // 12 sustained voices, algorithmic reverb (Freeverb — no IR generation, which
 // avoids the iOS offline-render hang that Tone.Reverb can trigger), a gesture
-// noise layer, and a unified voicing model that crossfades between plucked
-// arpeggio and sustained chord as the network settles.
+// noise layer, a unified voicing model that crossfades between plucked
+// arpeggio and sustained chord as the network settles, and a Limiter before
+// Destination so 12 voices summing doesn't clip.
 
 import { N } from './network.js';
 
@@ -21,12 +22,38 @@ export class Engine {
     this._noiseActive = false;
   }
 
+  // Synchronous iOS unlock. Must be called from inside the user-gesture event
+  // handler BEFORE any await — otherwise iOS Safari treats the resulting
+  // AudioContext as "not user-initiated" and silently refuses to play sound.
+  // Plays a single-sample silent buffer on the raw WebAudio context; that's
+  // the classic iOS unlock pattern, robust across Safari/Chrome/Firefox iOS.
+  unlockSync() {
+    try {
+      const ctx = Tone.context.rawContext || Tone.context;
+      if (ctx.state !== 'running' && typeof ctx.resume === 'function') {
+        ctx.resume();
+      }
+      const buf = ctx.createBuffer(1, 1, 22050);
+      const src = ctx.createBufferSource();
+      src.buffer = buf;
+      src.connect(ctx.destination);
+      if (typeof src.start === 'function') src.start(0); else src.noteOn(0);
+    } catch (e) {
+      console.warn('unlockSync failed', e);
+    }
+  }
+
   async start() {
     if (this.started) return;
+    // Tone.start() is idempotent and fast once the context has been unlocked
+    // synchronously above. Still await it to be sure the Transport is ready.
     await Tone.start();
     try { await Tone.context.resume(); } catch {}
 
-    this.master = new Tone.Gain(0.75).toDestination();
+    // Limiter at -3 dB prevents the 12-voice summing bus from clipping under
+    // peak activations or delay feedback pileups. This was the laptop distortion.
+    this.limiter = new Tone.Limiter(-3).toDestination();
+    this.master = new Tone.Gain(0.6).connect(this.limiter);
 
     // Algorithmic reverb. No `await ready` — unlike Tone.Reverb, Freeverb has
     // no offline IR render, so it works reliably on iOS.
@@ -38,11 +65,13 @@ export class Engine {
 
     this.delay = new Tone.FeedbackDelay({
       delayTime: 0.42,
-      feedback: 0.38,
-      wet: 0.28,
+      feedback: 0.32,
+      wet: 0.22,
     }).connect(this.reverb);
 
-    this.voiceBus = new Tone.Gain(1).connect(this.delay);
+    // Per-voice budget: 12 voices × max ~0.45 = ~5.4 peak. Voice-bus gain
+    // scales that to ~0.9 going into the effects + limiter chain.
+    this.voiceBus = new Tone.Gain(0.16).connect(this.delay);
 
     const baseNote = 'C4';
     for (let i = 0; i < N; i++) {
@@ -63,18 +92,18 @@ export class Engine {
     this.noiseFilter.connect(this.noiseGain);
     this.noise.start();
 
-    // Prime tone — a quiet brief blip ensures iOS actually routes audio
-    // end-to-end right away, which helps keep the context from getting
-    // suspended again moments after unlock.
+    // Prime tone — a quiet brief blip confirms the pipeline is wired. On iOS
+    // this also forces the context to actually render a sample right away.
     const blip = new Tone.Oscillator({ frequency: 196, type: 'sine' }).connect(this.master);
     const t = Tone.now();
     blip.volume.value = -80;
     blip.start(t);
-    blip.volume.linearRampToValueAtTime(-32, t + 0.04);
+    blip.volume.linearRampToValueAtTime(-24, t + 0.04);
     blip.volume.linearRampToValueAtTime(-80, t + 0.7);
     blip.stop(t + 0.8);
 
     this.started = true;
+    console.log('[audio] started. ctx state:', Tone.context.state, 'sampleRate:', Tone.context.sampleRate);
   }
 
   // iOS can re-suspend the audio context after a silent stretch. A tick from
@@ -87,7 +116,7 @@ export class Engine {
     }
   }
 
-  setVolume(v)   { if (this.master) this.master.gain.rampTo(v, 0.1); }
+  setVolume(v)   { if (this.master) this.master.gain.rampTo(v * 0.8, 0.1); }
   setReverb(amt) { if (this.reverb) this.reverb.wet.rampTo(amt, 0.2); }
   setDelay(amt)  { if (this.delay)  this.delay.wet.rampTo(amt, 0.2); }
   setVoicing(v)  { this.voicing = v; this._arpIndex = 0; this._arpAccumulator = 0; }

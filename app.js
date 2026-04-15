@@ -107,25 +107,43 @@ function init() {
 }
 
 function bindStart() {
-  const start = async () => {
+  // Must do the iOS unlock SYNCHRONOUSLY inside the event handler, before any
+  // await. iOS Safari won't honor audio that was unlocked after an await
+  // boundary — the browser stops associating it with the user gesture.
+  let started = false;
+  const start = (e) => {
+    if (started) return;
+    started = true;
+    if (e) e.preventDefault();
+    // 1. Synchronous unlock — plays a silent 1-sample buffer right now.
+    audio.unlockSync();
+    // 2. Fade overlay.
     startOverlay.classList.add('fade-out');
     setTimeout(() => startOverlay.style.display = 'none', 600);
-    try {
-      await audio.start();
-      audio.setVolume(options.volume);
-      audio.setReverb(options.reverb);
-      audio.setDelay(options.delay);
-      audio.setVoicing(options.voicing);
-      audio.setArpRate(options.arpRateHz);
-    } catch (err) {
-      console.error('audio start failed', err);
-    }
-    running = true;
-    lastFrameMs = performance.now();
-    _prevState.set(net.state);
-    requestAnimationFrame(tick);
+    // 3. The rest (Tone.start, building the graph) can be async — the context
+    //    is already unlocked so iOS is happy.
+    (async () => {
+      try {
+        await audio.start();
+        audio.setVolume(options.volume);
+        audio.setReverb(options.reverb);
+        audio.setDelay(options.delay);
+        audio.setVoicing(options.voicing);
+        audio.setArpRate(options.arpRateHz);
+      } catch (err) {
+        console.error('audio start failed', err);
+      }
+      running = true;
+      lastFrameMs = performance.now();
+      _prevState.set(net.state);
+      requestAnimationFrame(tick);
+    })();
   };
-  startOverlay.addEventListener('pointerdown', start, { once: true });
+  // Listen for touch + pointer + click — on iOS, touchstart fires first and
+  // is the most reliable gesture to attach audio unlock to.
+  startOverlay.addEventListener('touchstart', start, { passive: false });
+  startOverlay.addEventListener('pointerdown', start);
+  startOverlay.addEventListener('click',       start);
 }
 
 // ---------- Main loop ----------
@@ -226,21 +244,37 @@ function stepSpring(dt) {
 }
 
 function bindSquish() {
-  // Document-level pointer handlers survive the pointer leaving the square
-  // and are reliable on iOS Safari, where setPointerCapture is flaky.
-  const onDocMove = (e) => {
-    if (!squish.dragging || e.pointerId !== squish.activePointerId) return;
-    e.preventDefault();
+  // Mobile Safari's pointer events are flaky: sometimes pointermove never
+  // fires after a touch pointerdown, or the pointerId silently changes
+  // mid-drag. We handle BOTH pointer events (desktop, Android, non-touch iOS
+  // Chrome) AND native touch events (iOS Safari primary path). Whichever
+  // fires first wins; the other is ignored via the `squish.dragging` flag.
+
+  const beginDrag = (clientX, clientY) => {
+    if (squish.dragging) return;
+    squish.dragging = true;
+    squish.grabOffsetX = clientX - squish.x;
+    squish.grabOffsetY = clientY - squish.y;
+    squish.lastPointerX = clientX;
+    squish.lastPointerY = clientY;
+    squish.lastPointerT = performance.now();
+    squish.peakVelocity = 0;
+    squareEl.classList.add('grabbing');
+    audio.noiseOn();
+  };
+
+  const updateDrag = (clientX, clientY) => {
+    if (!squish.dragging) return;
     const t = performance.now();
     const ddt = Math.max(1, t - squish.lastPointerT);
-    const nvx = (e.clientX - squish.lastPointerX) / (ddt / 1000);
-    const nvy = (e.clientY - squish.lastPointerY) / (ddt / 1000);
+    const nvx = (clientX - squish.lastPointerX) / (ddt / 1000);
+    const nvy = (clientY - squish.lastPointerY) / (ddt / 1000);
     squish.vx = squish.vx * 0.6 + nvx * 0.4;
     squish.vy = squish.vy * 0.6 + nvy * 0.4;
-    squish.x = e.clientX - squish.grabOffsetX;
-    squish.y = e.clientY - squish.grabOffsetY;
-    squish.lastPointerX = e.clientX;
-    squish.lastPointerY = e.clientY;
+    squish.x = clientX - squish.grabOffsetX;
+    squish.y = clientY - squish.grabOffsetY;
+    squish.lastPointerX = clientX;
+    squish.lastPointerY = clientY;
     squish.lastPointerT = t;
     const speed = Math.hypot(squish.vx, squish.vy);
     if (speed > squish.peakVelocity) squish.peakVelocity = speed;
@@ -252,9 +286,8 @@ function bindSquish() {
     showDragReadout(x01, y01, speed);
   };
 
-  const onDocUp = (e) => {
+  const endDrag = () => {
     if (!squish.dragging) return;
-    if (squish.activePointerId !== -1 && e.pointerId !== squish.activePointerId) return;
     squish.dragging = false;
     squish.activePointerId = -1;
     squareEl.classList.remove('grabbing');
@@ -263,29 +296,84 @@ function bindSquish() {
     const x01 = clamp01(squish.x / window.innerWidth);
     const y01 = clamp01(squish.y / window.innerHeight);
     applyPerturbation(x01, y01, squish.peakVelocity);
-
-    document.removeEventListener('pointermove', onDocMove);
-    document.removeEventListener('pointerup', onDocUp);
-    document.removeEventListener('pointercancel', onDocUp);
   };
 
-  squareEl.addEventListener('pointerdown', (e) => {
-    e.preventDefault();
-    squish.dragging = true;
-    squish.activePointerId = e.pointerId;
-    squish.grabOffsetX = e.clientX - squish.x;
-    squish.grabOffsetY = e.clientY - squish.y;
-    squish.lastPointerX = e.clientX;
-    squish.lastPointerY = e.clientY;
-    squish.lastPointerT = performance.now();
-    squish.peakVelocity = 0;
-    squareEl.classList.add('grabbing');
-    audio.noiseOn();
+  // Shared state between pointer and touch paths so we can dedupe iOS, which
+  // dispatches BOTH a synthetic pointerdown and a real touchstart for the
+  // same finger. We let whichever fires first claim the drag and the other
+  // short-circuits.
+  let touchId = null;
+  let ignoreNextPointer = false;
 
-    document.addEventListener('pointermove', onDocMove, { passive: false });
-    document.addEventListener('pointerup', onDocUp);
-    document.addEventListener('pointercancel', onDocUp);
+  // ---- Pointer event path (desktop + Android Chrome + non-touch iOS Chrome) ----
+  const onPointerMove = (e) => {
+    if (!squish.dragging || touchId != null) return;
+    e.preventDefault();
+    updateDrag(e.clientX, e.clientY);
+  };
+  const onPointerUp = (e) => {
+    if (!squish.dragging) return;
+    if (touchId != null) return; // touch path owns this drag
+    endDrag();
+    document.removeEventListener('pointermove', onPointerMove);
+    document.removeEventListener('pointerup', onPointerUp);
+    document.removeEventListener('pointercancel', onPointerUp);
+  };
+  squareEl.addEventListener('pointerdown', (e) => {
+    // If a touch already claimed this drag, skip.
+    if (ignoreNextPointer || touchId != null) {
+      ignoreNextPointer = false;
+      return;
+    }
+    e.preventDefault();
+    squish.activePointerId = e.pointerId;
+    beginDrag(e.clientX, e.clientY);
+    document.addEventListener('pointermove', onPointerMove, { passive: false });
+    document.addEventListener('pointerup', onPointerUp);
+    document.addEventListener('pointercancel', onPointerUp);
   });
+
+  // ---- Touch event path (iOS Safari primary) ----
+  // We track the identifier of the first touch that started the drag, ignore
+  // other fingers until it ends.
+  const findTouch = (touchList) => {
+    for (let k = 0; k < touchList.length; k++) {
+      if (touchList[k].identifier === touchId) return touchList[k];
+    }
+    return null;
+  };
+  const onTouchMove = (e) => {
+    if (touchId == null) return;
+    const tch = findTouch(e.touches);
+    if (!tch) return;
+    e.preventDefault();
+    updateDrag(tch.clientX, tch.clientY);
+  };
+  const onTouchEnd = (e) => {
+    if (touchId == null) return;
+    // If our specific finger lifted, end the drag.
+    const stillHeld = findTouch(e.touches);
+    if (stillHeld) return;
+    touchId = null;
+    ignoreNextPointer = false; // clear in case no synthetic pointerdown ever arrived
+    endDrag();
+    document.removeEventListener('touchmove', onTouchMove);
+    document.removeEventListener('touchend', onTouchEnd);
+    document.removeEventListener('touchcancel', onTouchEnd);
+  };
+  squareEl.addEventListener('touchstart', (e) => {
+    if (touchId != null) return;
+    if (e.changedTouches.length === 0) return;
+    const t = e.changedTouches[0];
+    e.preventDefault();
+    touchId = t.identifier;
+    // Block the synthetic pointerdown that iOS Safari fires right after.
+    ignoreNextPointer = true;
+    beginDrag(t.clientX, t.clientY);
+    document.addEventListener('touchmove', onTouchMove, { passive: false });
+    document.addEventListener('touchend', onTouchEnd);
+    document.addEventListener('touchcancel', onTouchEnd);
+  }, { passive: false });
 }
 
 function applyPerturbation(x01, y01, peakVelocity) {
