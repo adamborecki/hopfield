@@ -1,4 +1,4 @@
-// network.js — Hopfield network core for Hopfield Harmonics.
+// network.js — Hopfield network core.
 // 12 pitch-class nodes, continuous-valued activations in [-1, 1] via tanh update.
 // Weights come from a consonance table indexed by |i - j| mod 12, so consonant
 // intervals pull nodes toward matching signs (co-activation) and dissonant

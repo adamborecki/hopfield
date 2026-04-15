@@ -1,4 +1,4 @@
-// viz.js — p5.js sketch for the Hopfield network.
+// viz.js — p5.js sketch for Hopfield.
 // Draws 12 nodes on a circle, connected by edges whose brightness tracks
 // |weight| and whose warmth tracks sign(weight). A subtle field of drifting
 // equation fragments sits behind everything. Nodes glow based on their

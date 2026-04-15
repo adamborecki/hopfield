@@ -1,4 +1,4 @@
-// app.js — orchestration for Hopfield Harmonics.
+// app.js — orchestration for Hopfield.
 // Owns the tick loop, the perturbation gesture, the settings panel, and
 // the learn-mode interactions. Keeps network / audio / viz loosely coupled.
 
@@ -12,14 +12,14 @@ import { Viz } from './viz.js';
 // ---------- Options ----------
 
 const options = {
-  updateRateHz:       8,
+  updateRateHz:       12,
   consonanceScale:    1.0,
   temperature:        0.25,
   reverb:             0.4,
   delay:              0.28,
   autoPerturbSeconds: 0,
-  arpeggiate:         'chord',       // 'chord' | 'arpeggio'
-  arpRateHz:          5,
+  voicing:            'adaptive',     // 'adaptive' | 'chord' | 'arpeggio'
+  arpRateHz:          6,
   volume:             0.75,
   learnMode:          false,
 };
@@ -44,13 +44,19 @@ let paused = false;
 let running = false;
 let readoutClearTimer = null;
 
+// Settledness tracking: 0 = freshly perturbed / chaotic, 1 = relaxed.
+// Drives both the arp\u2192chord audio morph and the dormant-square fade.
+const _prevState = new Float32Array(N);
+let _settledness = 1.0;
+let _msSinceLastPerturb = Infinity;
+
 // ---------- Perturbation square (spring physics) ----------
 
 const squish = {
   x: 0, y: 0, vx: 0, vy: 0,
   anchorX: 0, anchorY: 0,
-  k: 40,             // spring stiffness
-  c: 8,              // damping
+  k: 40,
+  c: 8,
   dragging: false,
   grabOffsetX: 0,
   grabOffsetY: 0,
@@ -58,6 +64,7 @@ const squish = {
   lastPointerY: 0,
   lastPointerT: 0,
   peakVelocity: 0,
+  activePointerId: -1,
 };
 
 // ---------- DOM lookups ----------
@@ -92,10 +99,10 @@ function init() {
   bindVizTaps();
 
   window.addEventListener('resize', () => {
-    const nx = Math.min(squish.x, window.innerWidth - 100);
-    const ny = Math.min(squish.y, window.innerHeight - 100);
-    squish.anchorX = Math.max(20, nx);
-    squish.anchorY = Math.max(20, ny);
+    squish.anchorX = Math.min(squish.anchorX, window.innerWidth  - 100);
+    squish.anchorY = Math.min(squish.anchorY, window.innerHeight - 100);
+    squish.anchorX = Math.max(20, squish.anchorX);
+    squish.anchorY = Math.max(20, squish.anchorY);
   });
 }
 
@@ -108,13 +115,14 @@ function bindStart() {
       audio.setVolume(options.volume);
       audio.setReverb(options.reverb);
       audio.setDelay(options.delay);
-      audio.setMode(options.arpeggiate);
+      audio.setVoicing(options.voicing);
       audio.setArpRate(options.arpRateHz);
     } catch (err) {
       console.error('audio start failed', err);
     }
     running = true;
     lastFrameMs = performance.now();
+    _prevState.set(net.state);
     requestAnimationFrame(tick);
   };
   startOverlay.addEventListener('pointerdown', start, { once: true });
@@ -127,9 +135,9 @@ function tick(now) {
   lastFrameMs = now;
   const dt = dtMs / 1000;
 
+  audio.keepAwake();
   stepSpring(dt);
 
-  // Network updates — N updates per "iteration" so each tick roughly touches every node.
   if (!paused) {
     updateAccumulator += dtMs;
     const stepMs = 1000 / options.updateRateHz;
@@ -137,32 +145,53 @@ function tick(now) {
       updateAccumulator -= stepMs;
       const info = updateOnce(net, { temperature: options.temperature, rate: 0.9 });
       viz.onStep(info);
-      // Flash the audio voice if the node meaningfully changed its on-ness.
       const delta = Math.abs(info.newValue - info.oldValue);
       if (delta > 0.15 && info.newValue > 0) audio.flash(info.index, Math.min(0.6, delta));
     }
 
-    // Auto-perturb timer (0 = off).
     if (options.autoPerturbSeconds > 0) {
       autoPerturbAccumulator += dtMs;
       if (autoPerturbAccumulator >= options.autoPerturbSeconds * 1000) {
         autoPerturbAccumulator = 0;
         const bias = new Float32Array(N).fill(1);
+        const eBefore = energy(net.state, net.weights);
         perturb(net, { magnitude: 0.3, bias });
-        flashReadout('auto-perturb', '+\u03c3 = 0.30');
+        _msSinceLastPerturb = 0;
+        _settledness = 0;
+        squareEl.classList.add('dormant');
+        flashReadout('auto-perturb', `\u0394E=+${(energy(net.state, net.weights) - eBefore).toFixed(2)}`);
       }
     }
   }
 
-  audio.updateVoices(net.state, dtMs);
+  updateSettledness(dtMs);
+  audio.updateVoices(net.state, dtMs, _settledness);
 
-  // Track energy history every ~80ms.
+  // The square re-emerges when things are calm and enough time has passed
+  // since the last shake to feel like a deliberate return rather than a flicker.
+  if (_settledness > 0.86 && _msSinceLastPerturb > 1200 && !squish.dragging) {
+    squareEl.classList.remove('dormant');
+  }
+  _msSinceLastPerturb += dtMs;
+
   if (ctx.energyHistory.length === 0 || (now % 80) < dtMs) {
     ctx.energyHistory.push(energy(net.state, net.weights));
     if (ctx.energyHistory.length > 200) ctx.energyHistory.shift();
   }
 
   requestAnimationFrame(tick);
+}
+
+function updateSettledness(dtMs) {
+  let delta = 0;
+  for (let i = 0; i < N; i++) delta += Math.abs(net.state[i] - _prevState[i]);
+  _prevState.set(net.state);
+  const activity = delta / N;
+  // Activity -> 0 means state not changing -> target settledness -> 1.
+  const target = Math.exp(-activity * 22);
+  // Smooth the estimate so the arp->chord morph and square fade don't jitter.
+  const k = Math.min(1, dtMs / 180);
+  _settledness = _settledness * (1 - k) + target * k;
 }
 
 // ---------- Perturbation square ----------
@@ -197,27 +226,15 @@ function stepSpring(dt) {
 }
 
 function bindSquish() {
-  squareEl.addEventListener('pointerdown', (e) => {
+  // Document-level pointer handlers survive the pointer leaving the square
+  // and are reliable on iOS Safari, where setPointerCapture is flaky.
+  const onDocMove = (e) => {
+    if (!squish.dragging || e.pointerId !== squish.activePointerId) return;
     e.preventDefault();
-    squish.dragging = true;
-    squish.grabOffsetX = e.clientX - squish.x;
-    squish.grabOffsetY = e.clientY - squish.y;
-    squish.lastPointerX = e.clientX;
-    squish.lastPointerY = e.clientY;
-    squish.lastPointerT = performance.now();
-    squish.peakVelocity = 0;
-    squareEl.setPointerCapture(e.pointerId);
-    squareEl.classList.add('grabbing');
-    audio.noiseOn();
-  });
-
-  squareEl.addEventListener('pointermove', (e) => {
-    if (!squish.dragging) return;
     const t = performance.now();
     const ddt = Math.max(1, t - squish.lastPointerT);
     const nvx = (e.clientX - squish.lastPointerX) / (ddt / 1000);
     const nvy = (e.clientY - squish.lastPointerY) / (ddt / 1000);
-    // Exponential smoothing so velocity reads aren't jittery.
     squish.vx = squish.vx * 0.6 + nvx * 0.4;
     squish.vy = squish.vy * 0.6 + nvy * 0.4;
     squish.x = e.clientX - squish.grabOffsetX;
@@ -233,27 +250,46 @@ function bindSquish() {
     const v01 = Math.min(1, speed / 2000);
     audio.setNoiseParams({ x: x01, y: y01, velocity: v01 });
     showDragReadout(x01, y01, speed);
-  });
+  };
 
-  const release = (e) => {
+  const onDocUp = (e) => {
     if (!squish.dragging) return;
+    if (squish.activePointerId !== -1 && e.pointerId !== squish.activePointerId) return;
     squish.dragging = false;
+    squish.activePointerId = -1;
     squareEl.classList.remove('grabbing');
-    try { squareEl.releasePointerCapture(e.pointerId); } catch {}
     audio.noiseOff();
 
     const x01 = clamp01(squish.x / window.innerWidth);
     const y01 = clamp01(squish.y / window.innerHeight);
-    const peak = squish.peakVelocity;
-    applyPerturbation(x01, y01, peak);
+    applyPerturbation(x01, y01, squish.peakVelocity);
+
+    document.removeEventListener('pointermove', onDocMove);
+    document.removeEventListener('pointerup', onDocUp);
+    document.removeEventListener('pointercancel', onDocUp);
   };
 
-  squareEl.addEventListener('pointerup', release);
-  squareEl.addEventListener('pointercancel', release);
+  squareEl.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    squish.dragging = true;
+    squish.activePointerId = e.pointerId;
+    squish.grabOffsetX = e.clientX - squish.x;
+    squish.grabOffsetY = e.clientY - squish.y;
+    squish.lastPointerX = e.clientX;
+    squish.lastPointerY = e.clientY;
+    squish.lastPointerT = performance.now();
+    squish.peakVelocity = 0;
+    squareEl.classList.add('grabbing');
+    audio.noiseOn();
+
+    document.addEventListener('pointermove', onDocMove, { passive: false });
+    document.addEventListener('pointerup', onDocUp);
+    document.addEventListener('pointercancel', onDocUp);
+  });
 }
 
 function applyPerturbation(x01, y01, peakVelocity) {
-  const magnitude = Math.min(1.2, 0.15 + peakVelocity / 1600);
+  const magnitude = Math.min(1.2, 0.18 + peakVelocity / 1600);
   const bias = computeBias(x01, y01);
   const eBefore = energy(net.state, net.weights);
   perturb(net, { magnitude, bias });
@@ -264,18 +300,19 @@ function applyPerturbation(x01, y01, peakVelocity) {
     `x=${x01.toFixed(2)}  y=${y01.toFixed(2)}  v=${Math.round(peakVelocity)}  \u0394E=${dE >= 0 ? '+' : ''}${dE.toFixed(2)}`
   );
   autoPerturbAccumulator = 0;
+  _settledness = 0;
+  _msSinceLastPerturb = 0;
+  squareEl.classList.add('dormant');
 }
 
 function computeBias(x01, y01) {
-  // x picks a center pitch (around the chromatic circle); y widens the
-  // perturbation — low y = targeted disturbance, high y = broad shake.
   const center = x01 * N;
   const spread = 0.6 + y01 * 4.5;
   const bias = new Float32Array(N);
   let maxB = 0;
   for (let i = 0; i < N; i++) {
     const raw = Math.abs(i - center);
-    const d = Math.min(raw, N - raw);                 // wrap-around distance
+    const d = Math.min(raw, N - raw);
     const b = Math.exp(-(d * d) / (2 * spread * spread));
     bias[i] = b;
     if (b > maxB) maxB = b;
@@ -343,19 +380,25 @@ function bindSettings() {
   bind('s-arp-rate',      'arpRateHz',        v => +v, v => audio.setArpRate(v));
   bind('s-volume',        'volume',           v => +v, v => audio.setVolume(v));
 
-  // Chord / arpeggio radios.
-  document.querySelectorAll('input[name="s-arpeggiate"]').forEach(r => {
-    r.checked = (r.value === options.arpeggiate);
+  document.querySelectorAll('input[name="s-voicing"]').forEach(r => {
+    r.checked = (r.value === options.voicing);
     r.addEventListener('change', () => {
       if (!r.checked) return;
-      options.arpeggiate = r.value;
-      audio.setMode(r.value);
+      options.voicing = r.value;
+      audio.setVoicing(r.value);
     });
   });
+
+  // Default update-rate slider reflects the higher default now.
+  const urEl = document.getElementById('s-update-rate');
+  if (urEl) urEl.value = options.updateRateHz;
 
   resetBtn.addEventListener('click', () => {
     reset(net);
     ctx.energyHistory = [];
+    _settledness = 0;
+    _msSinceLastPerturb = 0;
+    squareEl.classList.add('dormant');
   });
 
   updateSettingsLabels();

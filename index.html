@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
   <meta name="theme-color" content="#0a0c12">
-  <title>Hopfield Harmonics</title>
+  <title>Hopfield</title>
 
   <style>
     :root {
@@ -39,8 +39,9 @@
     #viz {
       position: fixed; inset: 0;
       z-index: 1;
+      touch-action: none;
     }
-    #viz canvas { display: block; }
+    #viz canvas { display: block; touch-action: none; }
 
     /* ---- Start overlay ---- */
     #start {
@@ -112,9 +113,13 @@
       letter-spacing: 0.14em;
       text-transform: lowercase;
       touch-action: none;
+      -webkit-touch-callout: none;
+      -webkit-user-drag: none;
+      -webkit-tap-highlight-color: transparent;
       cursor: grab;
-      transition: box-shadow 0.2s, color 0.2s;
-      will-change: transform;
+      opacity: 1;
+      transition: opacity 2.4s ease-in, box-shadow 0.2s, color 0.2s;
+      will-change: transform, opacity;
     }
     #squish.grabbing {
       cursor: grabbing;
@@ -123,6 +128,11 @@
         0 20px 60px rgba(0,0,0,0.6),
         0 0 0 1px rgba(240,180,120,0.25) inset,
         0 0 60px rgba(240, 180, 120, 0.18);
+    }
+    #squish.dormant {
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.55s ease-out;
     }
     #squish span { pointer-events: none; line-height: 1.3; }
 
@@ -360,8 +370,8 @@
     <h2>settings</h2>
 
     <div class="row">
-      <div class="row-head"><span>Update rate</span><span class="val" id="v-update-rate">8 Hz</span></div>
-      <input type="range" id="s-update-rate" min="1" max="20" step="1" value="8">
+      <div class="row-head"><span>Update rate</span><span class="val" id="v-update-rate">12 Hz</span></div>
+      <input type="range" id="s-update-rate" min="1" max="24" step="1" value="12">
     </div>
 
     <div class="row">
@@ -392,14 +402,15 @@
     <div class="row">
       <div class="row-head"><span>Voicing</span></div>
       <div class="radio-row">
-        <label><input type="radio" name="s-arpeggiate" value="chord" checked> chord</label>
-        <label><input type="radio" name="s-arpeggiate" value="arpeggio"> arpeggio</label>
+        <label><input type="radio" name="s-voicing" value="adaptive" checked> adaptive</label>
+        <label><input type="radio" name="s-voicing" value="chord"> chord</label>
+        <label><input type="radio" name="s-voicing" value="arpeggio"> arp</label>
       </div>
     </div>
 
     <div class="row">
-      <div class="row-head"><span>Arpeggio rate</span><span class="val" id="v-arp-rate">5 Hz</span></div>
-      <input type="range" id="s-arp-rate" min="1" max="16" step="0.5" value="5">
+      <div class="row-head"><span>Arpeggio rate</span><span class="val" id="v-arp-rate">6 Hz</span></div>
+      <input type="range" id="s-arp-rate" min="1" max="16" step="0.5" value="6">
     </div>
 
     <div class="row">
@@ -435,7 +446,7 @@
 
   <div id="start">
     <div class="start-card">
-      <h1>Hopfield Harmonics</h1>
+      <h1>Hopfield</h1>
       <p>A neural network that listens to itself. Grab the square, wiggle, and watch twelve neurons argue their way into a chord.</p>
       <div class="start-btn">tap to begin</div>
     </div>
